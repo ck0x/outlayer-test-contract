@@ -1,5 +1,7 @@
 # OutLayer Evaluation Contract (NEAR + Rust)
 
+[![Publish OutLayer Worker WASM](https://github.com/ck0x/outlayer-test-contract/actions/workflows/publish-outlayer-worker.yml/badge.svg)](https://github.com/ck0x/outlayer-test-contract/actions/workflows/publish-outlayer-worker.yml)
+
 This repository contains a minimal NEAR smart contract specifically for evaluating OutLayer integration flows.
 
 The contract is intentionally small and focuses on three checks:
@@ -121,8 +123,8 @@ Then run the workflow once manually (Actions tab) or push changes under `outlaye
 
 - **Project Name**: `outlayer-test`
 - **Code Source**:
-	- Prefer **WASM URL** if dashboard does not support subdirectory builds
-	- Use **GitHub Repository** only if OutLayer supports building from `outlayer-worker/` path
+  - Prefer **WASM URL** if dashboard does not support subdirectory builds
+  - Use **GitHub Repository** only if OutLayer supports building from `outlayer-worker/` path
 - **WASM URL (recommended)**: `https://ck0x.github.io/outlayer-test-contract/outlayer-worker/latest.wasm`
 - **Repository**: `https://github.com/ck0x/outlayer-test-contract`
 - **Commit/Branch**: `main`
