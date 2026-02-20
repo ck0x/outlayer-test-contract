@@ -1,7 +1,5 @@
 use near_sdk::json_types::U64;
-use near_sdk::{
-    AccountId, PanicOnDefault, env, near, require,
-};
+use near_sdk::{AccountId, PanicOnDefault, env, near, require};
 
 #[near(serializers = [json, borsh])]
 #[derive(Clone, PartialEq, Eq)]
@@ -270,9 +268,12 @@ mod tests {
 
         let alice_context = get_context(alice.clone());
         testing_env!(alice_context.build());
-        let request_id = contract.request_execution("hello-program".to_string(), "{\"x\":1}".to_string());
+        let request_id =
+            contract.request_execution("hello-program".to_string(), "{\"x\":1}".to_string());
 
-        let request = contract.get_request(request_id).expect("request should exist");
+        let request = contract
+            .get_request(request_id)
+            .expect("request should exist");
         assert_eq!(request.requester, alice);
         assert!(matches!(request.status, RequestStatus::Pending));
 
@@ -280,7 +281,9 @@ mod tests {
         testing_env!(operator_context.build());
         contract.submit_result(request_id, "{\"ok\":true}".to_string());
 
-        let completed_request = contract.get_request(request_id).expect("request should still exist");
+        let completed_request = contract
+            .get_request(request_id)
+            .expect("request should still exist");
         assert!(matches!(completed_request.status, RequestStatus::Completed));
         assert_eq!(completed_request.result.as_deref(), Some("{\"ok\":true}"));
     }
@@ -354,7 +357,9 @@ mod tests {
             "https://httpbin.org/get".to_string(),
         );
 
-        let request = contract.get_request(request_id).expect("request should exist");
+        let request = contract
+            .get_request(request_id)
+            .expect("request should exist");
         assert_eq!(request.requester, alice);
         assert!(matches!(request.kind, RequestKind::SecretFetch { .. }));
 
@@ -362,7 +367,9 @@ mod tests {
         testing_env!(operator_context.build());
         contract.submit_result(request_id, "{\"status\":200}".to_string());
 
-        let completed_request = contract.get_request(request_id).expect("request should exist");
+        let completed_request = contract
+            .get_request(request_id)
+            .expect("request should exist");
         assert!(matches!(completed_request.status, RequestStatus::Completed));
     }
 }

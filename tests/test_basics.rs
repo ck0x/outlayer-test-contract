@@ -144,7 +144,10 @@ async fn test_basics_on(contract_wasm: Vec<u8>) -> testresult::TestResult<()> {
         .assert_success();
 
     let secret_fetch_request: Option<ExecutionRequest> = contract
-        .call_function("get_request", json!({"request_id": request_secret_fetch_id}))
+        .call_function(
+            "get_request",
+            json!({"request_id": request_secret_fetch_id}),
+        )
         .read_only()
         .fetch_from(&sandbox_network)
         .await?
