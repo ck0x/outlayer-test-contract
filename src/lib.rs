@@ -1,5 +1,5 @@
 use near_sdk::json_types::U64;
-use near_sdk::{AccountId, PanicOnDefault, env, near, require};
+use near_sdk::{AccountId, Gas, NearToken, PanicOnDefault, Promise, env, near, require};
 
 #[near(serializers = [json, borsh])]
 #[derive(Clone, PartialEq, Eq)]
@@ -150,6 +150,65 @@ impl Contract {
         })
     }
 
+    #[payable]
+    pub fn call_outlayer_project(
+        &mut self,
+        outlayer_contract_id: AccountId,
+        project_id: String,
+        version_key: Option<String>,
+        input_data: Option<String>,
+        response_format: Option<String>,
+    ) -> Promise {
+        let input_payload = input_data.clone().unwrap_or_else(|| "{}".to_string());
+        let request_id = self.push_request(RequestKind::Execution {
+            program_id: format!("project:{}", project_id),
+            input_payload,
+        });
+
+        let source = if let Some(version_key) = version_key {
+            near_sdk::serde_json::json!({
+                "Project": {
+                    "project_id": project_id,
+                    "version_key": version_key
+                }
+            })
+        } else {
+            near_sdk::serde_json::json!({
+                "Project": {
+                    "project_id": project_id
+                }
+            })
+        };
+
+        let request_args = near_sdk::serde_json::json!({
+            "source": source,
+            "input_data": input_data,
+            "response_format": response_format,
+        })
+        .to_string()
+        .into_bytes();
+
+        let callback_args = near_sdk::serde_json::json!({
+            "request_id": request_id,
+        })
+        .to_string()
+        .into_bytes();
+
+        Promise::new(outlayer_contract_id)
+            .function_call(
+                "request_execution".to_string(),
+                request_args,
+                env::attached_deposit(),
+                Gas::from_tgas(100),
+            )
+            .then(Promise::new(env::current_account_id()).function_call(
+                "on_outlayer_result".to_string(),
+                callback_args,
+                NearToken::from_yoctonear(0),
+                Gas::from_tgas(20),
+            ))
+    }
+
     pub fn request_secret_fetch(&mut self, binary_id: U64, env_key: String, url: String) -> U64 {
         require!(
             self.binaries.iter().any(|binary| binary.id == binary_id),
@@ -184,6 +243,37 @@ impl Contract {
             self.requests[index].status == RequestStatus::Pending,
             "Request already completed"
         );
+
+        self.requests[index].status = RequestStatus::Completed;
+        self.requests[index].result = Some(result);
+    }
+
+    #[private]
+    pub fn on_outlayer_result(&mut self, request_id: U64) {
+        let Some(index) = self
+            .requests
+            .iter()
+            .position(|request| request.id == request_id)
+        else {
+            env::panic_str("Unknown request_id");
+        };
+
+        require!(
+            self.requests[index].status == RequestStatus::Pending,
+            "Request already completed"
+        );
+
+        let result = match env::promise_result_checked(0, 1024 * 1024) {
+            Ok(data) => {
+                let output = String::from_utf8_lossy(&data).to_string();
+                if output.is_empty() {
+                    "{}".to_string()
+                } else {
+                    output
+                }
+            }
+            Err(_) => "{\"error\":\"OutLayer execution failed\"}".to_string(),
+        };
 
         self.requests[index].status = RequestStatus::Completed;
         self.requests[index].result = Some(result);
