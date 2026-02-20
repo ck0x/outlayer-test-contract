@@ -1,276 +1,368 @@
-// Find NEAR documentation at https://docs.near.org
 use near_sdk::json_types::U64;
-use near_sdk::{AccountId, NearToken, PanicOnDefault, Promise, Timestamp, env, near, require};
+use near_sdk::{
+    AccountId, PanicOnDefault, env, near, require,
+};
 
-// Define the contract structure
-#[near(contract_state)]
-#[derive(PanicOnDefault)] // The contract is required to be initialized with `#[init]` functions
-pub struct Contract {
-    highest_bid: Bid,
-    auction_end_time: Timestamp,
-    auctioneer: AccountId,
-    is_claimed: bool,
+#[near(serializers = [json, borsh])]
+#[derive(Clone, PartialEq, Eq)]
+pub enum RequestStatus {
+    Pending,
+    Completed,
 }
 
-// The Bid structure is used as function return value (JSON-serialized) and as part of the Contract
-// state (Borsh-serialized)
 #[near(serializers = [json, borsh])]
 #[derive(Clone)]
-pub struct Bid {
-    pub bidder: AccountId,
-    pub bid: NearToken,
+pub enum RequestKind {
+    Execution {
+        program_id: String,
+        input_payload: String,
+    },
+    SecretFetch {
+        binary_id: U64,
+        env_key: String,
+        url: String,
+    },
 }
 
-// Implement the contract functions
+#[near(serializers = [json, borsh])]
+#[derive(Clone)]
+pub struct ExecutionRequest {
+    pub id: U64,
+    pub requester: AccountId,
+    pub kind: RequestKind,
+    pub status: RequestStatus,
+    pub result: Option<String>,
+}
+
+#[near(serializers = [json, borsh])]
+#[derive(Clone)]
+pub struct WasiBinary {
+    pub id: U64,
+    pub name: String,
+    pub wasm_sha256: String,
+    pub dashboard_upload_ref: String,
+}
+
+#[near(serializers = [json, borsh])]
+#[derive(Clone)]
+pub struct EncryptedEnvVar {
+    pub env_key: String,
+    pub ciphertext_b64: String,
+}
+
+#[near(contract_state)]
+#[derive(PanicOnDefault)]
+pub struct Contract {
+    owner_id: AccountId,
+    outlayer_operator_id: AccountId,
+    next_request_id: u64,
+    next_binary_id: u64,
+    requests: Vec<ExecutionRequest>,
+    binaries: Vec<WasiBinary>,
+    encrypted_envs: Vec<EncryptedEnvVar>,
+}
+
 #[near]
 impl Contract {
-    /// Initializer function that one must call after the contract code is deployed to an account
-    /// for the first time, all other functions will fail to execute until the contract state is
-    /// initialized (thanks to PanicOnDefault derive above).
-    /// It is common to batch contract initialization in the same transaction as contract deployment.
-    /// Sometimes #[private] attribute can also be useful to guard the function to be callable only
-    /// by the account where the contract is deployed to.
     #[init]
-    pub fn init(end_time: U64, auctioneer: AccountId) -> Self {
+    pub fn init(owner_id: AccountId, outlayer_operator_id: AccountId) -> Self {
         Self {
-            highest_bid: Bid {
-                bidder: env::current_account_id(),
-                bid: NearToken::from_yoctonear(1),
-            },
-            auction_end_time: end_time.into(),
-            is_claimed: false,
-            auctioneer,
+            owner_id,
+            outlayer_operator_id,
+            next_request_id: 0,
+            next_binary_id: 0,
+            requests: vec![],
+            binaries: vec![],
+            encrypted_envs: vec![],
         }
     }
 
-    /// Bid function can be called by any account on blockchain to make a higher bid on the auction
-    #[payable]
-    pub fn bid(&mut self) -> Promise {
-        // Assert the auction is still ongoing
+    pub fn get_owner_id(&self) -> AccountId {
+        self.owner_id.clone()
+    }
+
+    pub fn get_outlayer_operator_id(&self) -> AccountId {
+        self.outlayer_operator_id.clone()
+    }
+
+    pub fn set_outlayer_operator(&mut self, outlayer_operator_id: AccountId) {
+        self.assert_owner();
+        self.outlayer_operator_id = outlayer_operator_id;
+    }
+
+    pub fn register_wasi_binary(
+        &mut self,
+        name: String,
+        wasm_sha256: String,
+        dashboard_upload_ref: String,
+    ) -> U64 {
+        self.assert_owner();
+        let binary_id = self.next_binary_id;
+        self.next_binary_id += 1;
+
+        let binary = WasiBinary {
+            id: binary_id.into(),
+            name,
+            wasm_sha256,
+            dashboard_upload_ref,
+        };
+        self.binaries.push(binary);
+        binary_id.into()
+    }
+
+    pub fn get_binary(&self, binary_id: U64) -> Option<WasiBinary> {
+        self.binaries
+            .iter()
+            .find(|binary| binary.id == binary_id)
+            .cloned()
+    }
+
+    pub fn list_binaries(&self) -> Vec<WasiBinary> {
+        self.binaries.clone()
+    }
+
+    pub fn upsert_encrypted_env(&mut self, env_key: String, ciphertext_b64: String) {
+        self.assert_owner();
+        if let Some(existing) = self
+            .encrypted_envs
+            .iter_mut()
+            .find(|env_var| env_var.env_key == env_key)
+        {
+            existing.ciphertext_b64 = ciphertext_b64;
+            return;
+        }
+
+        self.encrypted_envs.push(EncryptedEnvVar {
+            env_key,
+            ciphertext_b64,
+        });
+    }
+
+    pub fn get_encrypted_env_keys(&self) -> Vec<String> {
+        self.encrypted_envs
+            .iter()
+            .map(|env_var| env_var.env_key.clone())
+            .collect()
+    }
+
+    pub fn request_execution(&mut self, program_id: String, input_payload: String) -> U64 {
+        self.push_request(RequestKind::Execution {
+            program_id,
+            input_payload,
+        })
+    }
+
+    pub fn request_secret_fetch(&mut self, binary_id: U64, env_key: String, url: String) -> U64 {
         require!(
-            env::block_timestamp() < self.auction_end_time,
-            "Auction has ended"
+            self.binaries.iter().any(|binary| binary.id == binary_id),
+            "Unknown binary_id"
+        );
+        require!(
+            self.encrypted_envs
+                .iter()
+                .any(|env_var| env_var.env_key == env_key),
+            "Unknown encrypted env key"
         );
 
-        // Current bid
-        let bid = env::attached_deposit();
-        let bidder = env::predecessor_account_id();
-
-        // Last bid recorded by the contract
-        let Bid {
-            bidder: last_bidder,
-            bid: last_bid,
-        } = self.highest_bid.clone();
-
-        // Check if the deposit is higher than the current bid
-        require!(bid > last_bid, "You must place a higher bid");
-
-        // Update the highest bid
-        self.highest_bid = Bid { bidder, bid };
-
-        // Transfer tokens back to the last bidder.
-        //
-        // NOTE: The result of this Promise is not handled. If this transfer fails (for example,
-        // because `last_bidder` account was removed), the previous bidder may not be refunded even
-        // though `self.highest_bid` has already been updated. For production use, consider
-        // implementing a withdrawal pattern or adding a callback to handle transfer failures.
-        Promise::new(last_bidder).transfer(last_bid)
+        self.push_request(RequestKind::SecretFetch {
+            binary_id,
+            env_key,
+            url,
+        })
     }
 
-    /// Claim function can be called by any account on blockchain to claim the auction and transfer
-    /// the tokens to the auctioneer
-    pub fn claim(&mut self) -> Promise {
-        // Assert the auction has ended
+    pub fn submit_result(&mut self, request_id: U64, result: String) {
+        self.assert_outlayer_operator();
+
+        let Some(index) = self
+            .requests
+            .iter()
+            .position(|request| request.id == request_id)
+        else {
+            env::panic_str("Unknown request_id");
+        };
+
         require!(
-            env::block_timestamp() > self.auction_end_time,
-            "Auction has not ended yet"
+            self.requests[index].status == RequestStatus::Pending,
+            "Request already completed"
         );
 
-        // Assert the auction has not been claimed yet
-        require!(!self.is_claimed, "Auction has already been claimed");
-        self.is_claimed = true;
-
-        // Transfer tokens to the auctioneer.
-        //
-        // NOTE: The result of this Promise is not handled. If this transfer fails (for example,
-        // because `last_bidder` account was removed), the previous bidder may not be refunded even
-        // though `self.highest_bid` has already been updated. For production use, consider
-        // implementing a withdrawal pattern or adding a callback to handle transfer failures.
-        Promise::new(self.auctioneer.clone()).transfer(self.highest_bid.bid)
+        self.requests[index].status = RequestStatus::Completed;
+        self.requests[index].result = Some(result);
     }
 
-    /*
-     * The functions below are read-only functions that can be called without a transaction (through
-     * JSON RPC query call). They read the data from the contract local storage and return the
-     * highest bid, auction end time, auctioneer, and claimed status
-     */
-
-    pub fn get_highest_bid(&self) -> Bid {
-        self.highest_bid.clone()
+    pub fn get_request(&self, request_id: U64) -> Option<ExecutionRequest> {
+        self.requests
+            .iter()
+            .find(|request| request.id == request_id)
+            .cloned()
     }
 
-    pub fn get_auction_end_time(&self) -> U64 {
-        self.auction_end_time.into()
+    pub fn list_requests(&self) -> Vec<ExecutionRequest> {
+        self.requests.clone()
     }
 
-    pub fn get_auctioneer(&self) -> AccountId {
-        self.auctioneer.clone()
+    fn push_request(&mut self, kind: RequestKind) -> U64 {
+        let request_id = self.next_request_id;
+        self.next_request_id += 1;
+
+        let request = ExecutionRequest {
+            id: request_id.into(),
+            requester: env::predecessor_account_id(),
+            kind,
+            status: RequestStatus::Pending,
+            result: None,
+        };
+
+        self.requests.push(request);
+        env::log_str(&format!("request_created:{}", request_id));
+        request_id.into()
     }
 
-    pub fn is_already_claimed(&self) -> bool {
-        self.is_claimed
+    fn assert_owner(&self) {
+        require!(
+            env::predecessor_account_id() == self.owner_id,
+            "Only owner can call this method"
+        );
+    }
+
+    fn assert_outlayer_operator(&self) {
+        require!(
+            env::predecessor_account_id() == self.outlayer_operator_id,
+            "Only OutLayer operator can submit results"
+        );
     }
 }
 
-/*
- * The rest of this file holds the inline tests for the code above
- * Learn more about Rust tests: https://doc.rust-lang.org/book/ch11-01-writing-tests.html
- */
 #[cfg(test)]
 mod tests {
     use super::*;
-    use near_sdk::json_types::U64;
     use near_sdk::test_utils::{VMContextBuilder, accounts};
-    use near_sdk::{AccountId, testing_env};
+    use near_sdk::testing_env;
 
-    fn get_context(predecessor_account_id: AccountId) -> VMContextBuilder {
+    fn get_context(predecessor: AccountId) -> VMContextBuilder {
         let mut builder = VMContextBuilder::new();
         builder
             .current_account_id(accounts(0))
-            .signer_account_id(predecessor_account_id.clone())
-            .predecessor_account_id(predecessor_account_id);
+            .signer_account_id(predecessor.clone())
+            .predecessor_account_id(predecessor);
         builder
     }
 
     #[test]
     fn init_contract() {
-        let end_time: U64 = U64::from(1000);
-        let alice: AccountId = "alice.near".parse().unwrap();
-        let contract = Contract::init(end_time, alice.clone());
+        let owner = accounts(1);
+        let operator = accounts(2);
+        let contract = Contract::init(owner.clone(), operator.clone());
 
-        let default_bid = contract.get_highest_bid();
-        assert_eq!(default_bid.bidder, env::current_account_id());
-        assert_eq!(default_bid.bid, NearToken::from_yoctonear(1));
-
-        let auction_end_time = contract.get_auction_end_time();
-        assert_eq!(auction_end_time, end_time);
-
-        let auctioneer = contract.get_auctioneer();
-        assert_eq!(auctioneer, alice);
-
-        assert!(!contract.is_already_claimed());
+        assert_eq!(contract.get_owner_id(), owner);
+        assert_eq!(contract.get_outlayer_operator_id(), operator);
+        assert!(contract.list_requests().is_empty());
     }
 
     #[test]
-    fn bid_successfully() {
-        let auctioneer: AccountId = "auctioneer.near".parse().unwrap();
-        let alice: AccountId = "alice.near".parse().unwrap();
-        let end_time: U64 = U64::from(1000);
-        let mut contract = Contract::init(end_time, auctioneer.clone());
+    fn callback_loop_works() {
+        let owner = accounts(1);
+        let operator = accounts(2);
+        let alice = accounts(3);
 
-        // Set block_timestamp before auction end time
-        let mut context = get_context(alice.clone());
-        context.block_timestamp(500);
-        context.attached_deposit(NearToken::from_near(2));
-        testing_env!(context.build());
+        let mut contract = Contract::init(owner.clone(), operator.clone());
 
-        // Bid should succeed
-        let _ = contract.bid();
+        let alice_context = get_context(alice.clone());
+        testing_env!(alice_context.build());
+        let request_id = contract.request_execution("hello-program".to_string(), "{\"x\":1}".to_string());
 
-        // Verify highest bid is updated
-        let highest_bid = contract.get_highest_bid();
-        assert_eq!(highest_bid.bidder, alice);
-        assert_eq!(highest_bid.bid, NearToken::from_near(2));
+        let request = contract.get_request(request_id).expect("request should exist");
+        assert_eq!(request.requester, alice);
+        assert!(matches!(request.status, RequestStatus::Pending));
+
+        let operator_context = get_context(operator);
+        testing_env!(operator_context.build());
+        contract.submit_result(request_id, "{\"ok\":true}".to_string());
+
+        let completed_request = contract.get_request(request_id).expect("request should still exist");
+        assert!(matches!(completed_request.status, RequestStatus::Completed));
+        assert_eq!(completed_request.result.as_deref(), Some("{\"ok\":true}"));
     }
 
     #[test]
-    #[should_panic(expected = "Auction has ended")]
-    fn bid_after_auction_ended() {
-        let auctioneer: AccountId = "auctioneer.near".parse().unwrap();
-        let alice: AccountId = "alice.near".parse().unwrap();
-        let end_time: U64 = U64::from(1000);
-        let mut contract = Contract::init(end_time, auctioneer.clone());
+    fn owner_registers_binary() {
+        let owner = accounts(1);
+        let operator = accounts(2);
+        let mut contract = Contract::init(owner.clone(), operator);
 
-        // Set block_timestamp after auction end time
-        let mut context = get_context(alice.clone());
-        context.block_timestamp(2000);
-        context.attached_deposit(NearToken::from_near(2));
-        testing_env!(context.build());
+        let owner_context = get_context(owner.clone());
+        testing_env!(owner_context.build());
 
-        // Bid should panic
-        let _ = contract.bid();
+        let binary_id = contract.register_wasi_binary(
+            "fetcher-v1".to_string(),
+            "abc123".to_string(),
+            "outlayer://artifact/fetcher-v1".to_string(),
+        );
+
+        let binary = contract.get_binary(binary_id).expect("binary should exist");
+        assert_eq!(binary.name, "fetcher-v1");
+        assert_eq!(binary.wasm_sha256, "abc123");
     }
 
     #[test]
-    #[should_panic(expected = "You must place a higher bid")]
-    fn bid_lower_than_current() {
-        let auctioneer: AccountId = "auctioneer.near".parse().unwrap();
-        let alice: AccountId = "alice.near".parse().unwrap();
-        let end_time: U64 = U64::from(1000);
-        let mut contract = Contract::init(end_time, auctioneer.clone());
+    #[should_panic(expected = "Unknown encrypted env key")]
+    fn secret_fetch_requires_secret_registration() {
+        let owner = accounts(1);
+        let operator = accounts(2);
+        let alice = accounts(3);
+        let mut contract = Contract::init(owner.clone(), operator);
 
-        // Set block_timestamp before auction end time
-        let mut context = get_context(alice.clone());
-        context.block_timestamp(500);
-        // Default bid is 1 yoctoNEAR, so bidding with 0 or less should fail
-        // But we'll bid with the same amount (1 yoctoNEAR) which should also fail
-        context.attached_deposit(NearToken::from_yoctonear(1));
-        testing_env!(context.build());
+        let owner_context = get_context(owner);
+        testing_env!(owner_context.build());
+        let binary_id = contract.register_wasi_binary(
+            "fetcher-v1".to_string(),
+            "abc123".to_string(),
+            "outlayer://artifact/fetcher-v1".to_string(),
+        );
 
-        // Bid should panic
-        let _ = contract.bid();
+        let alice_context = get_context(alice);
+        testing_env!(alice_context.build());
+        let _ = contract.request_secret_fetch(
+            binary_id,
+            "API_KEY".to_string(),
+            "https://httpbin.org/get".to_string(),
+        );
     }
 
     #[test]
-    fn claim_after_auction_ended() {
-        let auctioneer: AccountId = "auctioneer.near".parse().unwrap();
-        let end_time: U64 = U64::from(1000);
-        let mut contract = Contract::init(end_time, auctioneer.clone());
+    fn secret_fetch_flow_works() {
+        let owner = accounts(1);
+        let operator = accounts(2);
+        let alice = accounts(3);
+        let mut contract = Contract::init(owner.clone(), operator.clone());
 
-        // Set block_timestamp after auction end time
-        let mut context = get_context(auctioneer.clone());
-        context.block_timestamp(2000);
-        testing_env!(context.build());
+        let owner_context = get_context(owner);
+        testing_env!(owner_context.build());
+        let binary_id = contract.register_wasi_binary(
+            "fetcher-v1".to_string(),
+            "abc123".to_string(),
+            "outlayer://artifact/fetcher-v1".to_string(),
+        );
+        contract.upsert_encrypted_env("API_KEY".to_string(), "BASE64_CIPHERTEXT".to_string());
 
-        // Claim should succeed
-        let _ = contract.claim();
+        let alice_context = get_context(alice.clone());
+        testing_env!(alice_context.build());
+        let request_id = contract.request_secret_fetch(
+            binary_id,
+            "API_KEY".to_string(),
+            "https://httpbin.org/get".to_string(),
+        );
 
-        // Verify auction is marked as claimed
-        assert!(contract.is_already_claimed());
-    }
+        let request = contract.get_request(request_id).expect("request should exist");
+        assert_eq!(request.requester, alice);
+        assert!(matches!(request.kind, RequestKind::SecretFetch { .. }));
 
-    #[test]
-    #[should_panic(expected = "Auction has not ended yet")]
-    fn claim_before_auction_ended() {
-        let auctioneer: AccountId = "auctioneer.near".parse().unwrap();
-        let end_time: U64 = U64::from(1000);
-        let mut contract = Contract::init(end_time, auctioneer.clone());
+        let operator_context = get_context(operator);
+        testing_env!(operator_context.build());
+        contract.submit_result(request_id, "{\"status\":200}".to_string());
 
-        // Set block_timestamp before auction end time
-        let mut context = get_context(auctioneer.clone());
-        context.block_timestamp(500);
-        testing_env!(context.build());
-
-        // Claim should panic
-        let _ = contract.claim();
-    }
-
-    #[test]
-    #[should_panic(expected = "Auction has already been claimed")]
-    fn claim_twice() {
-        let auctioneer: AccountId = "auctioneer.near".parse().unwrap();
-        let end_time: U64 = U64::from(1000);
-        let mut contract = Contract::init(end_time, auctioneer.clone());
-
-        // Set block_timestamp after auction end time
-        let mut context = get_context(auctioneer.clone());
-        context.block_timestamp(2000);
-        testing_env!(context.build());
-
-        // First claim should succeed
-        let _ = contract.claim();
-
-        // Second claim should panic
-        let _ = contract.claim();
+        let completed_request = contract.get_request(request_id).expect("request should exist");
+        assert!(matches!(completed_request.status, RequestStatus::Completed));
     }
 }
