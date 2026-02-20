@@ -1,6 +1,9 @@
 use near_sdk::json_types::U64;
 use near_sdk::{AccountId, Gas, NearToken, PanicOnDefault, Promise, env, near, require};
 
+const OUTLAYER_REQUEST_GAS: Gas = Gas::from_tgas(250);
+const OUTLAYER_CALLBACK_GAS: Gas = Gas::from_tgas(20);
+
 #[near(serializers = [json, borsh])]
 #[derive(Clone, PartialEq, Eq)]
 pub enum RequestStatus {
@@ -199,13 +202,13 @@ impl Contract {
                 "request_execution".to_string(),
                 request_args,
                 env::attached_deposit(),
-                Gas::from_tgas(100),
+                OUTLAYER_REQUEST_GAS,
             )
             .then(Promise::new(env::current_account_id()).function_call(
                 "on_outlayer_result".to_string(),
                 callback_args,
                 NearToken::from_yoctonear(0),
-                Gas::from_tgas(20),
+                OUTLAYER_CALLBACK_GAS,
             ))
     }
 
