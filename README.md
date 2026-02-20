@@ -84,6 +84,52 @@ near contract call-function as-transaction '<CONTRACT_ACCOUNT_ID>' request_secre
 
 The contract does not perform the external fetch itself; it records requests and accepts OutLayer callback results via `submit_result`.
 
+## OutLayer Project Setup
+
+This repo now includes a monorepo worker at `outlayer-worker/` for `wasm32-wasip2`.
+
+### Build the OutLayer worker
+
+```bash
+cd outlayer-worker
+rustup target add wasm32-wasip2
+cargo build --release --target wasm32-wasip2
+```
+
+Worker artifact:
+
+- `outlayer-worker/target/wasm32-wasip2/release/outlayer-worker.wasm`
+
+### Stable WASM URL (for OutLayer WASM URL mode)
+
+This repo includes workflow `.github/workflows/publish-outlayer-worker.yml` that builds and publishes:
+
+- `outlayer-worker/latest.wasm`
+
+Expected URL:
+
+- `https://ck0x.github.io/outlayer-test-contract/outlayer-worker/latest.wasm`
+
+One-time setup in GitHub repository settings:
+
+1. Go to **Settings → Pages**
+2. Under **Build and deployment**, set **Source** to **GitHub Actions**
+
+Then run the workflow once manually (Actions tab) or push changes under `outlayer-worker/`.
+
+### Dashboard values (from your screenshot)
+
+- **Project Name**: `outlayer-test`
+- **Code Source**:
+	- Prefer **WASM URL** if dashboard does not support subdirectory builds
+	- Use **GitHub Repository** only if OutLayer supports building from `outlayer-worker/` path
+- **WASM URL (recommended)**: `https://ck0x.github.io/outlayer-test-contract/outlayer-worker/latest.wasm`
+- **Repository**: `https://github.com/ck0x/outlayer-test-contract`
+- **Commit/Branch**: `main`
+- **Build Target**: `wasm32-wasip2`
+
+If your OutLayer dashboard currently has no repository subdirectory field, the most reliable option is to upload/host the built wasm and choose **WASM URL**.
+
 ## Useful Links
 
 - [cargo-near](https://github.com/near/cargo-near) - NEAR smart contract development toolkit for Rust
